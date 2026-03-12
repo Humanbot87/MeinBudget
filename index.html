@@ -163,8 +163,7 @@
                     img.src = event.target.result;
                     img.onload = () => {
                         const canvas = document.createElement('canvas');
-                        // Höhere Auflösung für OCR behalten
-                        const MAX_WIDTH = 1500; 
+                        const MAX_WIDTH = 1200; 
                         let width = img.width;
                         let height = img.height;
 
@@ -177,50 +176,83 @@
                         canvas.height = height;
                         const ctx = canvas.getContext('2d');
                         
-                        // Graustufen-Filter für besseres OCR
-                        ctx.filter = 'grayscale(1) contrast(1.2)';
+                        // Optimierung fuer OCR
                         ctx.drawImage(img, 0, 0, width, height);
                         
-                        resolve(canvas.toDataURL('image/jpeg', 0.9));
+                        // Graustufen und Kontrasterhöhung via Canvas
+                        const imageData = ctx.getImageData(0, 0, width, height);
+                        const data = imageData.data;
+                        for (let i = 0; i < data.length; i += 4) {
+                            const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+                            // Einfacher Schwellenwert/Kontrast
+                            const val = avg > 128 ? 255 : 0;
+                            data[i] = data[i + 1] = data[i + 2] = avg; // Graustufen
+                        }
+                        ctx.putImageData(imageData, 0, 0);
+                        
+                        resolve(canvas.toDataURL('image/jpeg', 0.85));
                     };
                 };
             });
         }
 
-        // Klassische OCR Erkennung ohne AI Cloud
+        // Verbesserte klassische OCR Erkennung
         async function runOCR(imageData) {
             const worker = await Tesseract.createWorker('deu');
             const { data: { text } } = await worker.recognize(imageData);
             await worker.terminate();
             
-            console.log("Erkannter Text:", text);
-
-            // Parsing Logik
-            const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 2);
+            const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 1);
             
-            // 1. Händler finden (meist erste Zeile)
-            const storeName = lines[0] || "Unbekannter Händler";
+            // 1. Händler finden
+            // Wir ignorieren Zeilen, die nur Zahlen, Daten oder Sonderzeichen enthalten
+            const storeName = lines.find(line => {
+                return !/\d{2,}/.test(line) && line.length > 3 && !/[<>|]/.test(line);
+            }) || lines[0] || "Unbekannter Händler";
 
-            // 2. Preise finden (Suche nach Zahlen im Format XX.XX)
-            const priceRegex = /\d+[\.,]\d{2}/g;
-            const priceMatches = text.match(priceRegex);
-            
+            // 2. Preise finden
+            // Suche nach Mustern wie "12.50", "12,50", "CHF 12.50"
+            const priceRegex = /(?:total|summe|betrag|chf|eur|netto)?\s*(\d+[\.,]\s?\d{2})/gi;
             let totalAmount = 0;
-            if (priceMatches) {
-                // Den höchsten Betrag nehmen (meistens das Total auf Quittungen)
-                const numericPrices = priceMatches.map(p => parseFloat(p.replace(',', '.')));
-                totalAmount = Math.max(...numericPrices);
+            let match;
+            const prices = [];
+
+            // Alle Zahlen finden, die wie Preise aussehen
+            const genericPriceRegex = /\d+[\.,]\d{2}/g;
+            const allPriceMatches = text.match(genericPriceRegex) || [];
+            
+            if (allPriceMatches.length > 0) {
+                const numericPrices = allPriceMatches.map(p => {
+                    const val = parseFloat(p.replace(',', '.'));
+                    // Filter: Preise ueber 10000 oder Jahreszahlen wie 2024 ausschliessen, wenn sie nicht plausibel sind
+                    if (val > 10000) return 0;
+                    return val;
+                });
+                
+                // Wir suchen nach Schlüsselwörtern in der Zeile
+                const totalLine = lines.find(l => /total|summe|betrag|chf/i.test(l));
+                if (totalLine) {
+                    const totalMatch = totalLine.match(/\d+[\.,]\d{2}/);
+                    if (totalMatch) {
+                        totalAmount = parseFloat(totalMatch[0].replace(',', '.'));
+                    }
+                }
+                
+                // Fallback: Höchster gefundener Betrag (meist das Total)
+                if (totalAmount === 0) {
+                    totalAmount = Math.max(...numericPrices);
+                }
             }
 
-            // 3. Datum finden (DD.MM.YYYY oder DD.MM.YY)
-            const dateRegex = /\d{1,2}[\.\-/]\d{1,2}[\.\-/]\d{2,4}/g;
+            // 3. Datum finden
+            const dateRegex = /(\d{1,2})[\.\-/](\d{1,2})[\.\-/](\d{2,4})/g;
             const dateMatches = text.match(dateRegex);
-            let detectedDate = new Date().toISOString().split('T')[0]; // Default heute
+            let detectedDate = new Date().toISOString().split('T')[0];
 
             if (dateMatches) {
-                // Versuche das erste gefundene Datum zu parsen
-                const rawDate = dateMatches[0].replace(/-/g, '.').replace(/\//g, '.');
-                const parts = rawDate.split('.');
+                // Letztes Datum auf dem Beleg ist oft das korrekte (unten bei der Zahlung)
+                const lastDateStr = dateMatches[dateMatches.length - 1].replace(/-/g, '.').replace(/\//g, '.');
+                const parts = lastDateStr.split('.');
                 if (parts.length === 3) {
                     let day = parts[0].padStart(2, '0');
                     let month = parts[1].padStart(2, '0');
@@ -235,10 +267,9 @@
             }
 
             return {
-                title: storeName,
+                title: storeName.replace(/[^a-zA-Z0-9\s]/g, '').trim(),
                 amount: totalAmount,
-                date: detectedDate,
-                category: 'rechnungen'
+                date: detectedDate
             };
         }
 
@@ -268,11 +299,15 @@
                     closeModal();
                     showNotification(`Beleg erkannt: ${data.title} - CHF ${data.amount.toFixed(2)} (${new Date(data.date).toLocaleDateString('de-CH')})`);
                 } else {
-                    showNotification("Beleg lesbar, aber kein Betrag gefunden.", "error");
+                    showNotification("Beleg lesbar, aber Betrag unklar. Bitte manuell prüfen.", "info");
+                    // Wir füllen die Felder trotzdem aus, soweit erkannt
+                    document.getElementById('input-title').value = data.title;
+                    document.getElementById('input-amount').value = data.amount > 0 ? data.amount : "";
+                    document.getElementById('input-date').value = data.date;
                 }
             } catch (e) {
                 console.error("OCR Fehler:", e);
-                showNotification("Fehler beim Lesen des Belegs.", "error");
+                showNotification("Fehler beim Lesen. Bildqualität verbessern.", "error");
             } finally {
                 setScanning(false);
                 event.target.value = ''; 
@@ -453,7 +488,7 @@
     <div id="scan-loader" class="fixed inset-0 z-[200] bg-black/80 backdrop-blur-md hidden flex flex-col items-center justify-center">
         <div class="w-24 h-24 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-6"></div>
         <h2 class="text-xl font-bold text-white text-center px-6">Texterkennung läuft...</h2>
-        <p class="text-slate-400 mt-2">Daten werden ohne KI lokal verarbeitet</p>
+        <p class="text-slate-400 mt-2">Daten werden lokal verarbeitet (Optimierte Erkennung)</p>
     </div>
 
     <!-- Login Screen -->
@@ -521,7 +556,7 @@
                     <h3 id="modal-title" class="text-2xl font-bold">Eintrag</h3>
                     <label class="flex items-center gap-2 px-4 py-2 bg-white/10 rounded-xl cursor-pointer hover:bg-white/20 transition-all">
                         <svg class="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path></svg>
-                        <span class="text-xs font-bold uppercase tracking-widest">Scan (OCR)</span>
+                        <span class="text-xs font-bold uppercase tracking-widest">Scan (Optimiert)</span>
                         <input type="file" accept="image/*" capture="environment" class="hidden" onchange="window.handleScan(event)">
                     </label>
                 </div>
