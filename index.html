@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeinBudget</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut, signInWithCustomToken, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global styles
+        const style = document.createElement('style');
+        style.textContent = `
+            @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap');
+            body {
+                font-family: 'Plus Jakarta Sans', sans-serif;
+                background-color: #000000;
+                color: #ffffff;
+            }
+            .glass {
+                background: rgba(23, 23, 23, 0.8);
+                backdrop-filter: blur(12px);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+            .blue-gradient {
+                background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            }
+            .blue-glow {
+                box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+            }
+            .custom-scrollbar::-webkit-scrollbar {
+                width: 4px;
+            }
+            .custom-scrollbar::-webkit-scrollbar-track {
+                background: transparent;
+            }
+            .custom-scrollbar::-webkit-scrollbar-thumb {
+                background: #334155;
+                border-radius: 10px;
+            }
+            .no-scrollbar::-webkit-scrollbar {
+                display: none;
+            }
+            .no-scrollbar {
+                -ms-overflow-style: none;
+                scrollbar-width: none;
+            }
+        `;
+        document.head.appendChild(style);
+
+        // Deine Firebase-Konfiguration
+        const firebaseConfig = {
+            apiKey: "AIzaSyAvkTQNolf85Q-_WZiC_HrLNYJ2DArBVvo",
+            authDomain: "meinbudget-bca94.firebaseapp.com",
+            projectId: "meinbudget-bca94",
+            storageBucket: "meinbudget-bca94.firebasestorage.app",
+            messagingSenderId: "66530115679",
+            appId: "1:66530115679:web:f07803aa3a9e068e205bea"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        
+        // App ID für Firestore Pfade (Pflichtregel 1)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'meinbudget-bca94';
+
+        // State
+        let currentUser = null;
+        let transactions = [];
+        let activeTab = 'einnahmen';
+
+        // Auth Logic
+        async function login() {
+            const provider = new GoogleAuthProvider();
+            try {
+                // Bei Erfolg triggert onAuthStateChanged den Rest
+                await signInWithPopup(auth, provider);
+            } catch (error) {
+                console.error("Login failed", error);
+            }
+        }
+
+        async function logout() {
+            await signOut(auth);
+            window.location.reload();
+        }
+
+        // Initialisierung der Authentifizierung (Pflichtregel 3)
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                }
+                // onAuthStateChanged wird immer gerufen, wenn sich der Status ändert
+            } catch (e) {
+                console.error("Auth Init Error", e);
+            }
+        };
+        initAuth();
+
+        onAuthStateChanged(auth, (user) => {
+            currentUser = user;
+            const loginScreen = document.getElementById('login-screen');
+            const mainApp = document.getElementById('main-app');
+            
+            if (user) {
+                loginScreen.classList.add('hidden');
+                mainApp.classList.remove('hidden');
+                document.getElementById('user-name').innerText = user.displayName || 'User';
+                document.getElementById('user-img').src = user.photoURL || 'https://via.placeholder.com/40';
+                subscribeToData();
+            } else {
+                loginScreen.classList.remove('hidden');
+                mainApp.classList.add('hidden');
+            }
+        });
+
+        // Data Subscription (Pflichtregel 1 Pfade & Regel 3 Guard)
+        function subscribeToData() {
+            if (!currentUser) return;
+            // Pfad: /artifacts/{appId}/users/{userId}/{collectionName}
+            const q = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions');
+            onSnapshot(q, (snapshot) => {
+                transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                render();
+            }, (error) => {
+                console.error("Firestore Snapshot error:", error);
+            });
+        }
+
+        // Actions
+        window.saveItem = async () => {
+            if (!currentUser) return;
+            const title = document.getElementById('input-title').value;
+            const amount = parseFloat(document.getElementById('input-amount').value);
+            const date = document.getElementById('input-date').value;
+
+            if (!title || isNaN(amount)) return;
+
+            const newItem = {
+                title,
+                amount,
+                type: activeTab,
+                date: date || null,
+                paid: false,
+                createdAt: new Date().toISOString()
+            };
+
+            try {
+                const colRef = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions');
+                await addDoc(colRef, newItem);
+                closeModal();
+            } catch (e) {
+                console.error("Error adding document: ", e);
+            }
+        };
+
+        window.deleteItem = async (id) => {
+            if (!currentUser) return;
+            try {
+                await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions', id));
+            } catch (e) {
+                console.error("Error deleting document: ", e);
+            }
+        };
+
+        window.markAsPaid = async (id) => {
+            if (!currentUser) return;
+            try {
+                const itemRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions', id);
+                await updateDoc(itemRef, { 
+                    type: 'archiv', 
+                    paid: true, 
+                    paidAt: new Date().toISOString() 
+                });
+            } catch (e) {
+                console.error("Error updating document: ", e);
+            }
+        };
+
+        window.switchTab = (tab) => {
+            activeTab = tab;
+            render();
+        };
+
+        window.openModal = () => {
+            if (activeTab === 'archiv') return;
+            document.getElementById('modal-overlay').classList.remove('hidden');
+            document.getElementById('modal-title').innerText = {
+                'einnahmen': 'Neue Einnahme',
+                'fixkosten': 'Neue Fixkosten',
+                'rechnungen': 'Offene Rechnung',
+                'sparen': 'Sparziel hinzufügen'
+            }[activeTab];
+            
+            const dateContainer = document.getElementById('date-container');
+            const dateLabel = document.getElementById('date-label');
+            if (activeTab === 'einnahmen' || activeTab === 'rechnungen') {
+                dateContainer.classList.remove('hidden');
+                dateLabel.innerText = activeTab === 'einnahmen' ? 'Datum des Eingangs' : 'Fällig am';
+            } else {
+                dateContainer.classList.add('hidden');
+            }
+        };
+
+        window.closeModal = () => {
+            document.getElementById('modal-overlay').classList.add('hidden');
+            document.getElementById('input-title').value = '';
+            document.getElementById('input-amount').value = '';
+            document.getElementById('input-date').value = '';
+        };
+
+        // Formatting
+        const formatCHF = (val) => val.toLocaleString('de-CH', { style: 'currency', currency: 'CHF' });
+
+        function render() {
+            const listContainer = document.getElementById('list-container');
+            
+            // Calculate Totals
+            const sums = { einnahmen: 0, fixkosten: 0, rechnungen: 0, sparen: 0 };
+            transactions.forEach(t => {
+                if (sums[t.type] !== undefined) sums[t.type] += t.amount;
+            });
+            
+            const potential = sums.einnahmen - sums.fixkosten - sums.rechnungen - sums.sparen;
+
+            document.getElementById('display-income').innerText = formatCHF(sums.einnahmen);
+            document.getElementById('display-potential').innerText = formatCHF(potential);
+
+            // Tab Buttons UI
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                const tab = btn.getAttribute('data-tab');
+                if (tab === activeTab) {
+                    btn.className = "tab-btn px-4 py-2 rounded-xl text-sm font-semibold blue-gradient text-white blue-glow transition-all flex-shrink-0";
+                } else {
+                    btn.className = "tab-btn px-4 py-2 rounded-xl text-sm font-medium text-slate-400 hover:bg-white/5 transition-all flex-shrink-0";
+                }
+            });
+
+            // List UI
+            const filtered = transactions
+                .filter(t => t.type === activeTab)
+                .sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0));
+
+            if (filtered.length === 0) {
+                listContainer.innerHTML = `
+                    <div class="flex flex-col items-center justify-center py-20 text-slate-600">
+                        <svg class="w-12 h-12 mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        <p>Noch keine Einträge vorhanden.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            listContainer.innerHTML = filtered.map(t => `
+                <div class="glass p-5 rounded-2xl flex items-center justify-between group hover:border-blue-500/50 transition-all mb-3">
+                    <div class="flex-1">
+                        <h4 class="font-bold text-slate-100">${t.title}</h4>
+                        <div class="flex items-center gap-3 mt-1 text-xs text-slate-500">
+                            <span class="text-blue-400 font-semibold">${formatCHF(t.amount)}</span>
+                            ${t.date ? `<span>• ${new Date(t.date).toLocaleDateString('de-CH')}</span>` : ''}
+                            ${t.paidAt ? `<span class="text-emerald-500">• Bezahlt: ${new Date(t.paidAt).toLocaleDateString('de-CH')}</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        ${activeTab === 'rechnungen' ? `
+                            <button onclick="markAsPaid('${t.id}')" class="p-2.5 bg-emerald-500/10 text-emerald-500 rounded-xl hover:bg-emerald-500 hover:text-white transition-all">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path></svg>
+                            </button>
+                        ` : ''}
+                        <button onclick="deleteItem('${t.id}')" class="p-2.5 bg-rose-500/10 text-rose-500 rounded-xl hover:bg-rose-500 hover:text-white transition-all">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Expose to window
+        window.login = login;
+        window.logout = logout;
+
+    </script>
+</head>
+<body class="custom-scrollbar overflow-x-hidden">
+
+    <!-- Login Screen -->
+    <div id="login-screen" class="fixed inset-0 z-[100] flex flex-col items-center justify-center p-6 bg-black">
+        <div class="w-20 h-20 blue-gradient rounded-3xl mb-8 blue-glow flex items-center justify-center animate-pulse">
+            <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+        </div>
+        <h1 class="text-4xl font-extrabold mb-2 tracking-tight">Mein<span class="text-blue-500">Budget</span></h1>
+        <p class="text-slate-500 mb-10 text-center max-w-xs">Verwalte deine Finanzen modern und übersichtlich in Schweizer Franken.</p>
+        <button onclick="login()" class="flex items-center gap-3 px-8 py-4 bg-white text-black font-bold rounded-2xl hover:bg-slate-200 transition-all active:scale-95">
+            <svg class="w-6 h-6" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/><path fill="none" d="M1 1h22v22H1z"/></svg>
+            Mit Google anmelden
+        </button>
+    </div>
+
+    <!-- Main App UI -->
+    <div id="main-app" class="hidden min-h-screen">
+        <nav class="max-w-5xl mx-auto px-6 py-6 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 blue-gradient rounded-xl flex items-center justify-center blue-glow">
+                    <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+                </div>
+                <span class="font-bold text-xl tracking-tight">Mein<span class="text-blue-500">Budget</span></span>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="hidden md:flex flex-col items-end">
+                    <span id="user-name" class="text-sm font-semibold">Username</span>
+                    <button onclick="logout()" class="text-[10px] text-slate-500 uppercase tracking-widest hover:text-white transition-all">Abmelden</button>
+                </div>
+                <img id="user-img" class="w-10 h-10 rounded-full border border-white/10" src="" alt="User">
+            </div>
+        </nav>
+
+        <main class="max-w-5xl mx-auto px-6 pb-24">
+            <!-- Dash Stats -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-5 mb-10">
+                <div class="glass p-8 rounded-[2rem] relative overflow-hidden">
+                    <div class="absolute -right-4 -top-4 w-24 h-24 bg-emerald-500/10 rounded-full blur-3xl"></div>
+                    <p class="text-slate-500 text-sm font-medium uppercase tracking-widest mb-2">Einnahmen total</p>
+                    <h2 id="display-income" class="text-4xl font-black">CHF 0.00</h2>
+                </div>
+                <div class="blue-gradient p-8 rounded-[2rem] blue-glow relative overflow-hidden">
+                    <div class="absolute -right-4 -top-4 w-24 h-24 bg-white/10 rounded-full blur-2xl"></div>
+                    <p class="text-white/70 text-sm font-medium uppercase tracking-widest mb-2">Sparpotenzial</p>
+                    <h2 id="display-potential" class="text-4xl font-black">CHF 0.00</h2>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="flex items-center gap-1 overflow-x-auto pb-4 no-scrollbar mb-6">
+                <button onclick="switchTab('einnahmen')" data-tab="einnahmen" class="tab-btn px-4 py-2 rounded-xl text-sm font-semibold blue-gradient text-white">Einnahmen</button>
+                <button onclick="switchTab('fixkosten')" data-tab="fixkosten" class="tab-btn px-4 py-2 rounded-xl text-sm font-medium text-slate-400">Fixkosten</button>
+                <button onclick="switchTab('rechnungen')" data-tab="rechnungen" class="tab-btn px-4 py-2 rounded-xl text-sm font-medium text-slate-400">Rechnungen</button>
+                <button onclick="switchTab('sparen')" data-tab="sparen" class="tab-btn px-4 py-2 rounded-xl text-sm font-medium text-slate-400">Sparen</button>
+                <button onclick="switchTab('archiv')" data-tab="archiv" class="tab-btn px-4 py-2 rounded-xl text-sm font-medium text-slate-400">Archiv</button>
+            </div>
+
+            <!-- List Area -->
+            <div id="list-container" class="space-y-3">
+                <!-- Data here -->
+            </div>
+        </main>
+
+        <!-- Floating Add -->
+        <button onclick="openModal()" class="fixed bottom-8 right-8 w-16 h-16 blue-gradient rounded-full blue-glow flex items-center justify-center text-3xl shadow-2xl hover:scale-110 active:scale-95 transition-all z-40">
+            <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M12 4v16m8-8H4"></path></svg>
+        </button>
+
+        <!-- Modal -->
+        <div id="modal-overlay" class="fixed inset-0 bg-black/90 backdrop-blur-sm z-50 flex items-end md:items-center justify-center p-0 md:p-6 hidden">
+            <div class="bg-[#111] w-full max-w-lg p-8 rounded-t-[2.5rem] md:rounded-[2.5rem] border-t border-white/10 md:border-l">
+                <h3 id="modal-title" class="text-2xl font-bold mb-8">Eintrag hinzufügen</h3>
+                <div class="space-y-6">
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Bezeichnung</label>
+                        <input type="text" id="input-title" class="w-full bg-white/5 border border-white/10 rounded-2xl p-4 outline-none focus:border-blue-500 transition-all" placeholder="z.B. Bonus, Miete, Zahnarzt...">
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Betrag (CHF)</label>
+                            <input type="number" id="input-amount" step="0.05" class="w-full bg-white/5 border border-white/10 rounded-2xl p-4 outline-none focus:border-blue-500 transition-all" placeholder="0.00">
+                        </div>
+                        <div id="date-container">
+                            <label id="date-label" class="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Datum</label>
+                            <input type="date" id="input-date" class="w-full bg-white/5 border border-white/10 rounded-2xl p-4 outline-none focus:border-blue-500 transition-all">
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-10 flex gap-4">
+                    <button onclick="closeModal()" class="flex-1 py-4 font-bold text-slate-400 hover:text-white transition-all">Abbrechen</button>
+                    <button onclick="saveItem()" class="flex-1 py-4 blue-gradient rounded-2xl font-bold text-white blue-glow">Speichern</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
