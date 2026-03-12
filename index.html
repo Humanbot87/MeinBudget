@@ -27,11 +27,13 @@
         const db = getFirestore(app);
         
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'meinbudget-bca94';
+        const apiKey = ""; // Wird von der Umgebung bereitgestellt
 
         // State
         let currentUser = null;
         let transactions = [];
         let activeTab = 'einnahmen';
+        let isScanning = false;
 
         // Global styles
         const style = document.createElement('style');
@@ -70,14 +72,19 @@
                 -ms-overflow-style: none;
                 scrollbar-width: none;
             }
+            @keyframes spin {
+                to { transform: rotate(360deg); }
+            }
+            .animate-slow-spin {
+                animation: spin 3s linear infinite;
+            }
         `;
         document.head.appendChild(style);
 
-        // Auth Logic - Back to Popup Method
+        // Auth Logic
         window.login = async function() {
             const provider = new GoogleAuthProvider();
             try {
-                console.log("Starte Google Login Popup...");
                 await signInWithPopup(auth, provider);
             } catch (error) {
                 console.error("Login popup failed", error);
@@ -130,6 +137,83 @@
             }, (error) => {
                 console.error("Firestore Snapshot error:", error);
             });
+        }
+
+        // Gemini API Call with Exponential Backoff
+        async function callGemini(base64Image) {
+            const prompt = "Analyze this receipt. Extract the total amount in CHF, the store name (title), and a category (choose from: fixkosten, rechnungen, sparen). Return ONLY a JSON object with keys: title, amount (number), category.";
+            
+            const payload = {
+                contents: [{
+                    parts: [
+                        { text: prompt },
+                        { inlineData: { mimeType: "image/png", data: base64Image } }
+                    ]
+                }],
+                generationConfig: {
+                    responseMimeType: "application/json"
+                }
+            };
+
+            for (let i = 0; i < 5; i++) {
+                try {
+                    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+                        method: 'POST',
+                        body: JSON.stringify(payload)
+                    });
+                    if (!response.ok) throw new Error("API call failed");
+                    const result = await response.json();
+                    return JSON.parse(result.candidates[0].content.parts[0].text);
+                } catch (e) {
+                    await new Promise(r => setTimeout(r, Math.pow(2, i) * 1000));
+                }
+            }
+            throw new Error("Gemini API exhausted retries.");
+        }
+
+        // Scan Handler
+        window.handleScan = async (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            setScanning(true);
+            
+            try {
+                const reader = new FileReader();
+                reader.onloadend = async () => {
+                    const base64 = reader.result.split(',')[1];
+                    const data = await callGemini(base64);
+                    
+                    if (data && data.amount) {
+                        const newItem = {
+                            title: data.title || "Gescannter Beleg",
+                            amount: data.amount,
+                            type: 'archiv', // Scanned receipts are usually already paid
+                            date: new Date().toISOString().split('T')[0],
+                            paid: true,
+                            paidAt: new Date().toISOString(),
+                            createdAt: new Date().toISOString()
+                        };
+                        
+                        const colRef = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions');
+                        await addDoc(colRef, newItem);
+                        closeModal();
+                    }
+                    setScanning(false);
+                };
+                reader.readAsDataURL(file);
+            } catch (e) {
+                console.error("Scan error:", e);
+                alert("Fehler beim Scannen des Belegs. Bitte manuell eingeben.");
+                setScanning(false);
+            }
+        };
+
+        function setScanning(val) {
+            isScanning = val;
+            const loader = document.getElementById('scan-loader');
+            if (val) loader.classList.remove('hidden');
+            else loader.classList.add('hidden');
         }
 
         // Actions
@@ -356,6 +440,13 @@
 </head>
 <body class="custom-scrollbar overflow-x-hidden">
 
+    <!-- Scan Loader Overlay -->
+    <div id="scan-loader" class="fixed inset-0 z-[200] bg-black/80 backdrop-blur-md hidden flex flex-col items-center justify-center">
+        <div class="w-24 h-24 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-6"></div>
+        <h2 class="text-xl font-bold text-white">Beleg wird analysiert...</h2>
+        <p class="text-slate-400 mt-2">KI extrahiert Daten</p>
+    </div>
+
     <!-- Login Screen -->
     <div id="login-screen" class="fixed inset-0 z-[100] flex flex-col items-center justify-center p-6 bg-black">
         <div class="w-20 h-20 blue-gradient rounded-3xl mb-8 blue-glow flex items-center justify-center animate-pulse">
@@ -426,7 +517,15 @@
         <!-- Modal -->
         <div id="modal-overlay" class="fixed inset-0 bg-black/90 backdrop-blur-sm z-50 flex items-end md:items-center justify-center p-0 md:p-6 hidden">
             <div class="bg-[#111] w-full max-w-lg p-8 rounded-t-[2.5rem] md:rounded-[2.5rem] border-t border-white/10 md:border-l text-white">
-                <h3 id="modal-title" class="text-2xl font-bold mb-8">Eintrag hinzufügen</h3>
+                <div class="flex justify-between items-center mb-8">
+                    <h3 id="modal-title" class="text-2xl font-bold">Eintrag hinzufügen</h3>
+                    <!-- Receipt Scan Button -->
+                    <label class="flex items-center gap-2 px-4 py-2 bg-white/10 rounded-xl cursor-pointer hover:bg-white/20 transition-all">
+                        <svg class="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                        <span class="text-xs font-bold uppercase tracking-widest">Scan</span>
+                        <input type="file" accept="image/*" capture="environment" class="hidden" onchange="window.handleScan(event)">
+                    </label>
+                </div>
                 <div class="space-y-6">
                     <div>
                         <label class="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Bezeichnung</label>
