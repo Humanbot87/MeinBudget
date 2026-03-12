@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeinBudget</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tesseract OCR Library (Lokal im Browser, ohne KI-Cloud) -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
@@ -27,9 +29,6 @@
         const db = getFirestore(app);
         
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'meinbudget-bca94';
-        
-        // Dein persönlicher Gemini API Key
-        const apiKey = "AIzaSyDF0muQEWa5rJj4FPV7Ntrtgbk_e79drz4"; 
 
         // Status der App
         let currentUser = null;
@@ -154,81 +153,70 @@
             });
         }
 
-        // Bild verkleinern (Compression) für mobile Kameras
-        async function compressImage(file) {
-            return new Promise((resolve, reject) => {
+        // Bild verarbeiten (Preprocessing für OCR)
+        async function preprocessImage(file) {
+            return new Promise((resolve) => {
                 const reader = new FileReader();
                 reader.readAsDataURL(file);
                 reader.onload = (event) => {
                     const img = new Image();
                     img.src = event.target.result;
-                    img.onerror = () => reject("Bild konnte nicht geladen werden.");
                     img.onload = () => {
                         const canvas = document.createElement('canvas');
-                        const MAX_WIDTH = 1000;
-                        const MAX_HEIGHT = 1000;
+                        // Höhere Auflösung für OCR behalten
+                        const MAX_WIDTH = 1500; 
                         let width = img.width;
                         let height = img.height;
 
-                        if (width > height) {
-                            if (width > MAX_WIDTH) {
-                                height *= MAX_WIDTH / width;
-                                width = MAX_WIDTH;
-                            }
-                        } else {
-                            if (height > MAX_HEIGHT) {
-                                width *= MAX_HEIGHT / height;
-                                height = MAX_HEIGHT;
-                            }
+                        if (width > MAX_WIDTH) {
+                            height *= MAX_WIDTH / width;
+                            width = MAX_WIDTH;
                         }
+                        
                         canvas.width = width;
                         canvas.height = height;
                         const ctx = canvas.getContext('2d');
+                        
+                        // Graustufen-Filter für besseres OCR
+                        ctx.filter = 'grayscale(1) contrast(1.2)';
                         ctx.drawImage(img, 0, 0, width, height);
-                        const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
-                        resolve(dataUrl.split(',')[1]);
+                        
+                        resolve(canvas.toDataURL('image/jpeg', 0.9));
                     };
                 };
             });
         }
 
-        // Gemini Analyse - Optimiert fuer gemini-1.5-flash
-        async function callGemini(base64Image) {
-            const prompt = "Analysiere diesen Beleg. Extrahiere den Namen des Ladens (als 'title'), den Gesamtbetrag als Zahl (als 'amount') und wähle eine Kategorie aus: fixkosten, rechnungen, sparen (als 'category'). Gib NUR ein JSON-Objekt zurück.";
+        // Klassische OCR Erkennung ohne AI Cloud
+        async function runOCR(imageData) {
+            const worker = await Tesseract.createWorker('deu');
+            const { data: { text } } = await worker.recognize(imageData);
+            await worker.terminate();
             
-            const payload = {
-                contents: [{
-                    parts: [
-                        { text: prompt },
-                        { inlineData: { mimeType: "image/jpeg", data: base64Image } }
-                    ]
-                }],
-                generationConfig: {
-                    temperature: 0.1,
-                    responseMimeType: "application/json"
-                }
-            };
+            console.log("Erkannter Text:", text);
 
-            // Verwendung des stabilen Endpunkts und Modells
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
+            // Parsing Logik
+            const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 2);
             
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error?.message || "KI-Dienst nicht erreichbar.");
+            // 1. Händler finden (meist erste Zeile)
+            const storeName = lines[0] || "Unbekannter Händler";
+
+            // 2. Preise finden (Suche nach Zahlen im Format XX.XX)
+            const priceRegex = /\d+[\.,]\d{2}/g;
+            const priceMatches = text.match(priceRegex);
+            
+            let totalAmount = 0;
+            if (priceMatches) {
+                // Den höchsten Betrag nehmen (meistens das Total auf Quittungen)
+                const numericPrices = priceMatches.map(p => parseFloat(p.replace(',', '.')));
+                totalAmount = Math.max(...numericPrices);
             }
-            
-            const result = await response.json();
-            const textResponse = result.candidates?.[0]?.content?.parts?.[0]?.text;
-            
-            if (!textResponse) throw new Error("Keine Daten im Beleg gefunden.");
-            
-            return JSON.parse(textResponse);
+
+            return {
+                title: storeName,
+                amount: totalAmount,
+                category: 'rechnungen'
+            };
         }
 
         // Scan Handler
@@ -239,12 +227,12 @@
             setScanning(true);
             
             try {
-                const compressedBase64 = await compressImage(file);
-                const data = await callGemini(compressedBase64);
+                const processedImg = await preprocessImage(file);
+                const data = await runOCR(processedImg);
                 
-                if (data && typeof data.amount === 'number') {
+                if (data && data.amount > 0) {
                     const newItem = {
-                        title: data.title || "Scan Beleg",
+                        title: data.title,
                         amount: data.amount,
                         type: 'archiv', 
                         date: new Date().toISOString().split('T')[0],
@@ -255,13 +243,13 @@
                     
                     await addDoc(collection(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions'), newItem);
                     closeModal();
-                    showNotification("Beleg erkannt & archiviert!");
+                    showNotification(`Beleg erkannt: ${data.title} - CHF ${data.amount.toFixed(2)}`);
                 } else {
-                    showNotification("KI konnte Betrag nicht eindeutig lesen.", "error");
+                    showNotification("Beleg lesbar, aber kein Betrag gefunden.", "error");
                 }
             } catch (e) {
-                console.error("Scan Fehler:", e);
-                showNotification(`Fehler: ${e.message}`, "error");
+                console.error("OCR Fehler:", e);
+                showNotification("Fehler beim Lesen des Belegs.", "error");
             } finally {
                 setScanning(false);
                 event.target.value = ''; 
@@ -438,11 +426,11 @@
 </head>
 <body class="custom-scrollbar overflow-x-hidden">
 
-    <!-- Ladebildschirm -->
+    <!-- Ladebildschirm für OCR -->
     <div id="scan-loader" class="fixed inset-0 z-[200] bg-black/80 backdrop-blur-md hidden flex flex-col items-center justify-center">
         <div class="w-24 h-24 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-6"></div>
-        <h2 class="text-xl font-bold text-white text-center px-6">Beleg wird analysiert...</h2>
-        <p class="text-slate-400 mt-2">Gemini Flash KI verarbeitet Bilddaten</p>
+        <h2 class="text-xl font-bold text-white text-center px-6">Texterkennung läuft...</h2>
+        <p class="text-slate-400 mt-2">Daten werden ohne KI lokal verarbeitet</p>
     </div>
 
     <!-- Login Screen -->
@@ -510,7 +498,7 @@
                     <h3 id="modal-title" class="text-2xl font-bold">Eintrag</h3>
                     <label class="flex items-center gap-2 px-4 py-2 bg-white/10 rounded-xl cursor-pointer hover:bg-white/20 transition-all">
                         <svg class="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path></svg>
-                        <span class="text-xs font-bold uppercase tracking-widest">Scan</span>
+                        <span class="text-xs font-bold uppercase tracking-widest">Scan (OCR)</span>
                         <input type="file" accept="image/*" capture="environment" class="hidden" onchange="window.handleScan(event)">
                     </label>
                 </div>
