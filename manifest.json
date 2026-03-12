@@ -1,17 +1,17 @@
 {
-  "name": "MeinBudget",
-  "short_name": "Budget",
-  "start_url": ".",
+  "name": "MeinBudget Finanzplaner",
+  "short_name": "MeinBudget",
+  "description": "Verwalte deine Finanzen modern und übersichtlich in Schweizer Franken.",
+  "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#000000",
   "theme_color": "#000000",
   "icons": [
     {
-      "src": "https://cdn-icons-png.flaticon.com/512/2489/2489718.png",
+      "src": "Objekt.jpg",
       "sizes": "512x512",
-      "type": "image/png",
+      "type": "image/jpeg",
       "purpose": "any maskable"
     }
-  ],
-  "lang": "de"
+  ]
 }
