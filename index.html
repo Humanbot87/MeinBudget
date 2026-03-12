@@ -159,17 +159,30 @@
             });
         }
 
-        // Gemini API Call with better error handling and JSON cleaning
+        // Gemini API Call mit Structured JSON Response
         async function callGemini(base64Image) {
-            const prompt = "Analysiere diesen Beleg. Extrahiere den Gesamtbetrag in CHF (als reine Zahl), den Namen des Geschäfts (als Title) und ordne es einer Kategorie zu (fixkosten, rechnungen, sparen). Antworte NUR mit einem validen JSON Objekt in diesem Format: {\"title\": \"Name\", \"amount\": 12.50, \"category\": \"rechnungen\"}. Keine Markdown-Formatierung!";
+            const prompt = "Analyze this receipt image. Extract the store name, the total amount as a number, and choose a category from: fixkosten, rechnungen, sparen.";
             
             const payload = {
                 contents: [{
+                    role: "user",
                     parts: [
                         { text: prompt },
                         { inlineData: { mimeType: "image/png", data: base64Image } }
                     ]
-                }]
+                }],
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: {
+                            title: { type: "STRING" },
+                            amount: { type: "NUMBER" },
+                            category: { type: "STRING" }
+                        },
+                        required: ["title", "amount", "category"]
+                    }
+                }
             };
 
             for (let i = 0; i < 3; i++) {
@@ -180,18 +193,15 @@
                     });
                     if (!response.ok) throw new Error("API call failed");
                     const result = await response.json();
-                    let text = result.candidates[0].content.parts[0].text;
-                    
-                    // Clean potential markdown blocks
-                    text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-                    
+                    const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                    if (!text) throw new Error("Keine Antwort von KI erhalten");
                     return JSON.parse(text);
                 } catch (e) {
-                    console.error("Gemini attempt failed", e);
-                    await new Promise(r => setTimeout(r, 1000));
+                    console.error(`Gemini attempt ${i + 1} failed`, e);
+                    if (i === 2) throw e;
+                    await new Promise(r => setTimeout(r, (i + 1) * 1000));
                 }
             }
-            throw new Error("KI konnte den Beleg nicht verarbeiten.");
         }
 
         // Scan Handler
@@ -224,13 +234,14 @@
                             closeModal();
                             showNotification("Beleg erfolgreich erkannt & archiviert!");
                         } else {
-                            showNotification("Betrag konnte nicht eindeutig gelesen werden.", "error");
+                            showNotification("Daten konnten nicht korrekt gelesen werden.", "error");
                         }
                     } catch (innerError) {
-                        console.error("Reader error", innerError);
-                        showNotification("Fehler bei der Analyse.", "error");
+                        console.error("Processing error", innerError);
+                        showNotification("Fehler bei der Beleg-Analyse.", "error");
                     } finally {
                         setScanning(false);
+                        event.target.value = ''; // Reset input
                     }
                 };
                 reader.readAsDataURL(file);
@@ -479,7 +490,7 @@
     <!-- Scan Loader Overlay -->
     <div id="scan-loader" class="fixed inset-0 z-[200] bg-black/80 backdrop-blur-md hidden flex flex-col items-center justify-center">
         <div class="w-24 h-24 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-6"></div>
-        <h2 class="text-xl font-bold text-white">Beleg wird analysiert...</h2>
+        <h2 class="text-xl font-bold text-white text-center">Beleg wird analysiert...</h2>
         <p class="text-slate-400 mt-2">Gemini KI extrahiert Daten</p>
     </div>
 
