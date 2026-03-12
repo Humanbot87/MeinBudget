@@ -8,7 +8,7 @@
     <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInWithRedirect, GoogleAuthProvider, onAuthStateChanged, signOut, getRedirectResult, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Firebase Configuration
@@ -73,14 +73,14 @@
         `;
         document.head.appendChild(style);
 
-        // Auth Logic - Functions assigned to window for HTML access
+        // Auth Logic - Back to Popup Method
         window.login = async function() {
             const provider = new GoogleAuthProvider();
             try {
-                console.log("Starte Google Login...");
-                await signInWithRedirect(auth, provider);
+                console.log("Starte Google Login Popup...");
+                await signInWithPopup(auth, provider);
             } catch (error) {
-                console.error("Login start failed", error);
+                console.error("Login popup failed", error);
             }
         };
 
@@ -95,11 +95,6 @@
 
         const initAuth = async () => {
             try {
-                const result = await getRedirectResult(auth);
-                if (result) {
-                    console.log("Erfolgreich vom Redirect zurückgekehrt", result.user);
-                }
-                
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
                 }
