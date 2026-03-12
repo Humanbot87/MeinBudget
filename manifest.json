@@ -3,15 +3,23 @@
   "short_name": "MeinBudget",
   "description": "Verwalte deine Finanzen modern und übersichtlich in Schweizer Franken.",
   "start_url": "./index.html",
+  "scope": ".",
   "display": "standalone",
   "background_color": "#000000",
   "theme_color": "#000000",
+  "orientation": "portrait",
   "icons": [
     {
       "src": "Objekt.jpg",
       "sizes": "512x512",
       "type": "image/jpeg",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "Objekt.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "maskable"
     }
   ]
 }
